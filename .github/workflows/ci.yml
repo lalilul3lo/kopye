@@ -74,22 +74,22 @@ jobs:
           files: lcov.info
           disable_search: true
 
-  benchmark:
-    name: Benchmarks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - run: rustup show active-toolchain
-      - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall cargo-codspeed
-      - uses: Swatinem/rust-cache@v2
-
-      - run: cargo codspeed build --workspace
-      - uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          run: cargo codspeed run
+  # benchmark:
+  #   name: Benchmarks
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - run: rustup show active-toolchain
+  #     - uses: cargo-bins/cargo-binstall@main
+  #     - run: cargo binstall cargo-codspeed
+  #     - uses: Swatinem/rust-cache@v2
+  #
+  #     - run: cargo codspeed build --workspace
+  #     - uses: CodSpeedHQ/action@v3
+  #       with:
+  #         token: ${{ secrets.CODSPEED_TOKEN }}
+  #         run: cargo codspeed run
 
   miri:
     name: Miri
