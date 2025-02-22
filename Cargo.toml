@@ -1,0 +1,10 @@
+[package]
+name = "kopye"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version ="4.5.30", features= ["cargo"] }
+tera = "1.20.0"
+thiserror = "2.0.11"
+miette = { version = "7.5.0", features = ["fancy"] }
