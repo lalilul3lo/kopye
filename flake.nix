@@ -36,6 +36,17 @@
             lockFile = ./Cargo.lock;
           };
           src = pkgs.lib.cleanSource ./.;
+          # https://github.com/sfackler/rust-openssl/issues/948
+          nativeBuildInputs = [
+            pkgs.pkg-config
+          ];
+          buildInputs = [
+            pkgs.openssl.dev
+            pkgs.libiconv
+          ];
+          OPENSSL_STATIC = "0";
+          OPENSSL_INCLUDE_DIR =
+            (pkgs.lib.makeSearchPathOutput "dev" "include" [ pkgs.openssl.dev ]) + "/openssl";
         };
         devShells.default =
           with pkgs;
