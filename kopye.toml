@@ -1,0 +1,27 @@
+[project]
+type = "string"
+help = "Name of project"
+
+[binary]
+type = "bool"
+help = "Is project a binary"
+
+[nix_package]
+type = "bool"
+help = "Should this be packaged by nix"
+
+[target]
+type = "string"
+help = "Compilation targets"
+choices = [
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+]
+multiselect = true
+
+[node]
+path = "./node"
+
+[rust_bin]
+path = "./rust"
