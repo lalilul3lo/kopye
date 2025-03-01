@@ -3,6 +3,14 @@ use clap::{
     Command,
 };
 
+// Errors
+// Error pulling in config from repo remote or local
+// Error trying to lookup "project"
+// Error trying render template
+// Error trying to write or mkdir (Basically attempting to scaffold project)
+
+// Su
+
 // The CLI layer should only parse inputs and forward them to library code.
 fn main() {
     let matches = Command::new(crate_name!())
@@ -72,7 +80,7 @@ fn handle_copy(args: &ArgMatches, is_verbose: bool) {
         println!("executing in verbose mode");
     }
 
-    kopye::actions::copy_template(repo, template_name, destination);
+    kopye::api::copy_template(repo, template_name, destination);
 }
 
 fn handle_list(args: &ArgMatches, is_verbose: bool) {
@@ -88,5 +96,5 @@ fn handle_list(args: &ArgMatches, is_verbose: bool) {
         println!("Fetching all available templates")
     }
 
-    kopye::actions::list_templates(repo);
+    kopye::api::list_templates(repo);
 }

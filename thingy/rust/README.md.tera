@@ -1,0 +1,6 @@
+# {{project}}
+
+## Targets
+{% for target in targets %}
+- {{target}}
+{% endfor %}
