@@ -2,9 +2,13 @@ use clap::{
     crate_authors, crate_description, crate_name, crate_version, Arg, ArgAction, ArgMatches,
     Command,
 };
+use env_logger::Builder;
+use kopye::api::KopyeError;
+use log::LevelFilter;
+use miette::Result as MietteResult;
+use std::env;
 
-// The CLI layer should only parse inputs and forward them to library code.
-fn main() {
+fn main() -> MietteResult<()> {
     let matches = Command::new(crate_name!())
         .about(crate_description!())
         .author(crate_authors!())
@@ -35,31 +39,44 @@ fn main() {
         .subcommand(
             Command::new("list")
                 .about("list templates")
-                .arg(Arg::new("repo").help("git repository reference where templates live"))
-                .arg(
-                    Arg::new("all")
-                        .help("list all available templates")
-                        .short('a')
-                        .long("all")
-                        .action(ArgAction::SetTrue),
-                ), // if not provided fallback to repo that may be defined in global config
+                .arg(Arg::new("repo").help("git repository reference where templates live")),
         )
         .get_matches();
 
     let is_verbose = matches.get_flag("verbose");
 
+    init_logger(is_verbose);
+
     match matches.subcommand() {
         Some(("copy", args)) => {
-            handle_copy(args, is_verbose);
+            handle_copy(args).map_err(miette::Report::new)?;
+
+            Ok(())
         }
         Some(("list", args)) => {
-            handle_list(args, is_verbose);
+            handle_list(args).map_err(miette::Report::new)?;
+
+            Ok(())
         }
         _ => unreachable!(),
     }
 }
 
-fn handle_copy(args: &ArgMatches, is_verbose: bool) {
+fn init_logger(verbose: bool) {
+    let mut builder = Builder::from_default_env();
+
+    let level = if verbose {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Warn
+    };
+
+    builder.filter(None, level);
+
+    builder.init();
+}
+
+fn handle_copy(args: &ArgMatches) -> Result<(), KopyeError> {
     let repo = args.get_one::<String>("repo").expect("repo required");
     let template_name = args
         .get_one::<String>("template")
@@ -68,25 +85,11 @@ fn handle_copy(args: &ArgMatches, is_verbose: bool) {
         .get_one::<String>("destination")
         .expect("destination expected");
 
-    if is_verbose {
-        println!("executing in verbose mode");
-    }
-
-    kopye::actions::copy_template(repo, template_name, destination);
+    kopye::api::copy_template(repo, template_name, destination)
 }
 
-fn handle_list(args: &ArgMatches, is_verbose: bool) {
+fn handle_list(args: &ArgMatches) -> Result<(), KopyeError> {
     let repo = args.get_one::<String>("repo").expect("repo required");
 
-    let all_flag = args.get_flag("all");
-
-    if is_verbose {
-        println!("executing in verbose mode");
-    }
-
-    if all_flag {
-        println!("Fetching all available templates")
-    }
-
-    kopye::actions::list_templates(repo);
+    kopye::api::list_templates(repo)
 }
