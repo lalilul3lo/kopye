@@ -28,3 +28,5 @@ fn list_templates() {
 // 3. Test that questions file does not get copied
 // 4. test depends_on (ensure that it refers to an actual question)
 // 5. test depends_on (ensure that the question is a boolean)
+// 6. test transactions and rollback, give incomplete context (missing answer ) to tera to create
+//    template
