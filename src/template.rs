@@ -2,7 +2,7 @@ use crate::{
     errors::{FileOperation, IoError},
     prompt::{get_answers, Answer, PromptError},
     source::Source,
-    transactions::{RollbackOperation, Transaction},
+    transactions::{Active, Committed, RollbackOperation, Transaction},
     utils::normalize_path,
 };
 use colored::Colorize;
@@ -82,7 +82,11 @@ const TERA_FILE_EXTENSION: &str = "tera";
 /// - Tera fails to initialize or render a file.
 /// - I/O operations fail when reading or writing files.
 /// - No matching `.tera` files are found.
-pub fn try_render(config: Source, template: &str, destination: &str) -> Result<(), TemplateError> {
+pub fn try_render(
+    config: Source,
+    template: &str,
+    destination: &str,
+) -> Result<Transaction<Committed>, TemplateError> {
     let path_to_blueprint = &config
         .projects
         .get(template)
@@ -201,9 +205,7 @@ pub fn try_render(config: Source, template: &str, destination: &str) -> Result<(
         }
     }
 
-    // trx.commit(); // TODO: Compile time error if I don't call this method
-
-    Ok(())
+    Ok(trx.commit())
 }
 
 fn hydrate_tera_ctx(context: &mut Context, answers: IndexMap<String, Answer>) -> &mut Context {
@@ -239,7 +241,10 @@ fn hydrate_tera_ctx(context: &mut Context, answers: IndexMap<String, Answer>) ->
 /// # Errors
 ///
 /// Returns a [`KopyeError`] if any directory creation fails due to I/O issues.
-fn create_directory(trx: &mut Transaction, path: &std::path::Path) -> Result<(), TemplateError> {
+fn create_directory(
+    trx: &mut Transaction<Active>,
+    path: &std::path::Path,
+) -> Result<(), TemplateError> {
     std::fs::create_dir_all(path)
         .map_err(|error| IoError::new(FileOperation::Mkdir, path.into(), error))?;
 
@@ -258,7 +263,7 @@ fn create_directory(trx: &mut Transaction, path: &std::path::Path) -> Result<(),
 ///
 /// Returns a [`KopyeError`] if writing to the file fails due to I/O issues.
 fn write_file(
-    trx: &mut Transaction,
+    trx: &mut Transaction<Active>,
     path: &std::path::Path,
     contents: String,
 ) -> Result<(), TemplateError> {
