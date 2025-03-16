@@ -27,20 +27,25 @@ impl Transaction {
         while let Some(operation) = self.rollback_operations.pop() {
             match operation {
                 RollbackOperation::RemoveDir(path) => {
-                    let _ = fs::remove_file(&path);
+                    log::debug!("🚨...removing dir: {}", path.display());
+                    let _ = fs::remove_dir_all(&path);
                 }
                 RollbackOperation::RemoveFile(path) => {
-                    let _ = fs::remove_dir_all(&path);
+                    log::debug!("🚨...removing file: {}", path.display());
+                    let _ = fs::remove_file(&path);
                 }
             }
         }
     }
 }
+// NOTE: What happens if an error occurs while trying to rollback, then what
 impl Drop for Transaction {
     fn drop(&mut self) {
         if !self.rollback_operations.is_empty() {
+            log::debug!("⚠️...rolling back operations");
             self.rollback();
         } else {
+            log::debug!("...commiting transaction ✅");
             self.commit();
         }
     }

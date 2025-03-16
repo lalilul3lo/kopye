@@ -201,6 +201,8 @@ pub fn try_render(config: Source, template: &str, destination: &str) -> Result<(
         }
     }
 
+    // trx.commit(); // TODO: Compile time error if I don't call this method
+
     Ok(())
 }
 
