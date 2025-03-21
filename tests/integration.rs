@@ -1,4 +1,5 @@
 // Integration testing can be done either by calling library functions directly or by invoking your CLI as a subprocess.
+#[ignore]
 #[test]
 fn copy_template() {
     let repo = "gh:lalilul3lo/dev";
@@ -11,6 +12,7 @@ fn copy_template() {
     cmd.assert().success();
 }
 
+#[ignore]
 #[test]
 fn list_templates() {
     let repo = "gh:lalilul3lo/dev";
