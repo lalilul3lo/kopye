@@ -352,3 +352,16 @@ pub fn get_destination() -> Result<String, PromptError> {
 
     Ok(answer.to_owned())
 }
+
+pub fn apply_changes() -> Result<bool, PromptError> {
+    let question = String::from("Apply changes?");
+
+    let answer = Confirm::new(&question)
+        .prompt()
+        .map_err(|error| PromptError::Prompt {
+            question: question.to_string(),
+            source: error,
+        })?;
+
+    Ok(answer.to_owned())
+}

@@ -1,15 +1,19 @@
 use crate::{
     errors::{FileOperation, IoError},
-    prompt::{get_answers, Answer, PromptError},
+    preview::preview_as_tree,
+    prompt::{apply_changes, get_answers, Answer, PromptError},
     source::Source,
-    transactions::{Active, Committed, RollbackOperation, Transaction},
+    transactions::{Active, FinalTransactionState, RollbackOperation, Transaction},
     utils::normalize_path,
+    vfs::{VirtualEntry, VirtualFS},
 };
 use colored::Colorize;
 use indexmap::IndexMap;
 use miette::Diagnostic;
+use std::path::{Path, PathBuf};
 use tera::{Context, Tera};
 use thiserror::Error;
+use walkdir::WalkDir;
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum TemplateError {
@@ -66,172 +70,219 @@ pub enum TemplateError {
 
 const TERA_FILE_EXTENSION: &str = "tera";
 
-/// Renders the specified template from the given [`Source`] into the specified `destination` directory.
+/// Loops over path segments/components and renders them as tera templates and returns `Some(PathBuf)`
+/// It returns `None` if ANY segment is empty (I.E parent directory is conditionally rendered).
 ///
-/// # Process Overview
-/// 1. Looks up the `template` in the [`Source`]'s `projects` map.
-/// 2. Builds a Tera pattern for all `*.tera` files within the template directory.
-/// 3. Iterates over those files, rendering each one with a prompt-driven [`tera::Context`].
-/// 4. Writes out the rendered files into `destination`, creating directories as needed.
-/// 5. Tracks operations using a [`Transaction`] for potential rollback.
-///
-/// # Errors
-/// This function returns a [`TemplateError`] if:
-/// - The `template` is missing from the config.
-/// - The template directory path contains invalid UTF-8.
-/// - Tera fails to initialize or render a file.
-/// - I/O operations fail when reading or writing files.
-/// - No matching `.tera` files are found.
+/// For example, if your path segments are:
+///   `["{% if integrations_tests %}tests{% endif %}", "{% if mocks %}mocks{% endif %}", "{{project}}.rs"]`
+/// and `integrations_tests=false`, the first segment becomes `""`, so this returns `None`.
+fn render_path_segments(
+    path: &Path,
+    tera: &mut Tera,
+    ctx: &Context,
+) -> Result<Option<PathBuf>, TemplateError> {
+    let mut result = PathBuf::new();
+
+    for component in path.components() {
+        let segment_str = component.as_os_str().to_string_lossy();
+
+        let rendered =
+            tera.render_str(&segment_str, ctx)
+                .map_err(|error| TemplateError::Render {
+                    context: ctx.clone(),
+                    source: error,
+                })?;
+
+        if rendered.trim().is_empty() {
+            return Ok(None);
+        }
+
+        result.push(rendered.trim());
+    }
+
+    Ok(Some(result))
+}
+/// Recursively walks the `blueprint_directory`, renders each path segment as a tera template
+/// and builds up a [`VirtualFS`] of all directories and files that should be created.
+fn build_vfs(
+    source_directory: &Path,
+    tera: &mut Tera,
+    ctx: &Context,
+) -> Result<VirtualFS, TemplateError> {
+    let mut vfs = VirtualFS::new();
+
+    for entry in WalkDir::new(source_directory) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(error) => {
+                let path = error.path().unwrap_or_else(|| Path::new(""));
+
+                Err(IoError::new(
+                    FileOperation::Read,
+                    path.to_path_buf(),
+                    error.into(),
+                ))?
+            }
+        };
+
+        // skip blueprint config file
+        let file_name = entry.file_name().to_string_lossy();
+        if file_name == "blueprint.toml" {
+            continue;
+        }
+
+        let full_path = entry.path();
+        let relative = match full_path.strip_prefix(source_directory) {
+            Ok(r) => r,
+            Err(error) => Err(TemplateError::StripPrefix {
+                path: full_path.to_path_buf(),
+                dir: source_directory.to_path_buf(),
+                source: error,
+            })?,
+        };
+
+        // render the relative path segments/components as tera templates
+        let rendered_rel_path = render_path_segments(relative, tera, ctx)?;
+
+        // If `None`, at least one segment rendered to empty, therefore skip
+        let Some(rendered_path) = rendered_rel_path else {
+            // Skip this file or directory and it's children
+            continue;
+        };
+
+        if entry.file_type().is_dir() {
+            vfs.entries.push(VirtualEntry {
+                destination: Some(rendered_path),
+                content: None,
+                is_file: false,
+            });
+        } else {
+            let mut file_contents = std::fs::read_to_string(full_path).map_err(|error| {
+                IoError::new(FileOperation::Read, full_path.to_path_buf(), error)
+            })?;
+
+            let mut final_dest = rendered_path.clone();
+
+            let is_tera = rendered_path
+                .extension()
+                .map(|ext| ext == TERA_FILE_EXTENSION)
+                .unwrap_or(false);
+
+            // remove file extension and render file content if .tera extension detected
+            if is_tera {
+                let file_stem = final_dest.file_stem().unwrap_or_default().to_owned();
+                final_dest.set_file_name(file_stem);
+
+                let rendered = tera.render_str(&file_contents, ctx).map_err(|error| {
+                    TemplateError::Render {
+                        context: ctx.clone(),
+                        source: error,
+                    }
+                })?;
+
+                file_contents = rendered;
+            }
+
+            vfs.entries.push(VirtualEntry {
+                destination: Some(final_dest),
+                content: Some(file_contents),
+                is_file: true,
+            });
+        }
+    }
+
+    Ok(vfs)
+}
+/// Applies directory and file creation operations from a [`VirtualFS`].
+fn apply_vfs(
+    vfs: &VirtualFS,
+    destination_root: &Path,
+    trx: &mut Transaction<Active>,
+) -> Result<(), TemplateError> {
+    // First create all directories
+    for entry in vfs.entries.iter().filter(|e| !e.is_file) {
+        let Some(rel_dest) = &entry.destination else {
+            continue;
+        };
+        let final_path = destination_root.join(rel_dest);
+
+        create_directory(trx, &final_path)?;
+    }
+
+    // Then create all files
+    for entry in vfs.entries.iter().filter(|e| e.is_file) {
+        let Some(rel_dest) = &entry.destination else {
+            continue;
+        };
+        let final_path = destination_root.join(rel_dest);
+        // create parent if necessary
+        let parent = final_path.parent();
+        if let Some(parent) = parent {
+            create_directory(trx, parent)?;
+        }
+
+        let contents = entry.content.clone().unwrap_or_default();
+
+        write_file(trx, &final_path, contents)?;
+    }
+
+    Ok(())
+}
+/// Makes a [`Tera`] [`Context`] object, hydrated with user prompt answers.
+fn make_tera_context(answers: IndexMap<String, Answer>) -> Context {
+    let mut base_ctx = Context::new();
+    for (key, answer) in answers {
+        match answer {
+            Answer::String(ans) => base_ctx.insert(&key, &ans),
+            Answer::Bool(ans) => base_ctx.insert(&key, &ans),
+            Answer::Array(ans) => base_ctx.insert(&key, &ans),
+        }
+    }
+
+    base_ctx.clone()
+}
+/// Renders the specified template from the given [`Source`] into `destination`,
 pub fn try_render(
     config: Source,
     template: &str,
     destination: &str,
-) -> Result<Transaction<Committed>, TemplateError> {
-    let path_to_blueprint = &config
+) -> Result<FinalTransactionState, TemplateError> {
+    let path_to_blueprint = config
         .projects
         .get(template)
         .ok_or_else(|| TemplateError::ProjectNotFound {
             name: template.to_string(),
         })?
-        .path;
+        .path
+        .clone();
 
-    let blueprint_directory = config.source_dir.join(normalize_path(path_to_blueprint));
+    let blueprint_directory = config.source_dir.join(normalize_path(&path_to_blueprint));
 
     let answers = get_answers(&blueprint_directory)?;
 
-    let mut base_ctx = Context::new();
+    let tera_context = make_tera_context(answers);
 
-    let hydrated_ctx = hydrate_tera_ctx(&mut base_ctx, answers);
+    let pattern = format!("{}/**/*.tera", blueprint_directory.display());
 
-    let blueprint_directory_str =
-        blueprint_directory
-            .to_str()
-            .ok_or_else(|| TemplateError::InvalidProjectStringUnicode {
-                path: blueprint_directory.clone(),
-            })?;
+    let mut tera = Tera::new(&pattern)
+        .map_err(|e| TemplateError::TeraInstanceInitialization { pattern, source: e })?;
 
-    log::debug!("blueprint directory string: {}", blueprint_directory_str);
-
-    let pattern = format!("{}/**/*.{}", blueprint_directory_str, TERA_FILE_EXTENSION);
-
-    log::debug!("tera pattern: {}", pattern);
-
-    let mut tera =
-        Tera::new(&pattern).map_err(|err| TemplateError::TeraInstanceInitialization {
-            pattern: pattern.clone(),
-            source: err,
-        })?;
+    let vfs = build_vfs(&blueprint_directory, &mut tera, &tera_context)?;
 
     let destination_path = std::path::PathBuf::from(destination);
 
-    log::debug!("destination: {}", destination_path.display());
+    preview_as_tree(&vfs, &destination_path);
 
-    let mut trx = Transaction::new();
+    let mut trx = Transaction::<Active>::new();
 
-    for entry in walkdir::WalkDir::new(&blueprint_directory) {
-        match entry {
-            Ok(entry) => {
-                let path = entry.path();
+    if apply_changes()? {
+        apply_vfs(&vfs, &destination_path, &mut trx)?;
 
-                log::debug!("path: {}", path.display());
-
-                let file_name = path
-                    .file_name()
-                    .ok_or_else(|| TemplateError::GenerateFileName {
-                        path: path.to_path_buf(),
-                    })?
-                    .to_string_lossy();
-
-                if path.is_file() && file_name != "blueprint.toml" {
-                    let relative_path = path.strip_prefix(&blueprint_directory).map_err(|err| {
-                        TemplateError::StripPrefix {
-                            path: path.into(),
-                            dir: blueprint_directory.clone(),
-                            source: err,
-                        }
-                    })?;
-                    let parent = relative_path
-                        .parent()
-                        .unwrap_or_else(|| std::path::Path::new(""));
-
-                    let out_file_name = if path
-                        .extension()
-                        .is_some_and(|ext| ext == TERA_FILE_EXTENSION)
-                    {
-                        file_name.replace(&format!(".{}", TERA_FILE_EXTENSION), "")
-                    } else {
-                        file_name.to_string()
-                    };
-
-                    let file_destination_path = destination_path.join(parent).join(out_file_name);
-
-                    let content = std::fs::read_to_string(path).map_err(|err| {
-                        IoError::new(FileOperation::Read, path.to_path_buf(), err)
-                    })?;
-
-                    let rendered = tera.render_str(&content, hydrated_ctx).map_err(|err| {
-                        TemplateError::Render {
-                            context: hydrated_ctx.clone(),
-                            source: err,
-                        }
-                    })?;
-
-                    if let Some(parent_dir) = file_destination_path.parent() {
-                        let copy = parent_dir.to_owned();
-
-                        log::debug!("attempting to create directory: {}", copy.display());
-
-                        // PERF: might be creating multiple dirs
-                        create_directory(&mut trx, copy.as_path())?;
-                    }
-
-                    log::debug!(
-                        "attempting to write file: {}",
-                        file_destination_path.display()
-                    );
-
-                    write_file(&mut trx, file_destination_path.as_path(), rendered)?;
-                }
-            }
-            Err(err) => {
-                let path = err.path().unwrap_or(std::path::Path::new(""));
-
-                Err(IoError::new(
-                    FileOperation::Read,
-                    path.to_path_buf(),
-                    err.into(),
-                ))?
-            }
-        }
+        Ok(FinalTransactionState::Committed(trx.commit()))
+    } else {
+        Ok(FinalTransactionState::Canceled(trx.cancel()))
     }
-
-    Ok(trx.commit())
 }
-
-fn hydrate_tera_ctx(context: &mut Context, answers: IndexMap<String, Answer>) -> &mut Context {
-    for (key, answer) in answers {
-        match answer {
-            Answer::String(s) => {
-                context.insert(&key, &s);
-            }
-            // Answer::Int(i) => {
-            //     context.insert(&key, &i);
-            // }
-            // Answer::Float(f) => {
-            //     context.insert(&key, &f);
-            // }
-            Answer::Bool(b) => {
-                context.insert(&key, &b);
-            }
-            Answer::Array(arr) => {
-                context.insert(&key, &arr);
-            }
-        }
-    }
-
-    context
-}
-
 /// Creates all directories in the specified path if they do not exist.
 ///
 /// This function uses [`std::fs::create_dir_all`] to ensure the entire directory path
@@ -252,7 +303,6 @@ fn create_directory(
 
     Ok(())
 }
-
 /// Writes a file with the provided contents to the specified path.
 ///
 /// After the file is created or overwritten, a [`RollbackOperation::RemoveFile`] operation
